@@ -35,6 +35,7 @@ public class ProfilerPassDriver {
      * @param args
      */
     public static void main (String[] args) {
+        try{
         //
         // Configure soot by setting general options
         configureSoot();
@@ -50,8 +51,12 @@ public class ProfilerPassDriver {
         //Scene.v().loadClassAndSupport("lac.jinn.exlib.DataLogger");
 
         //
-        // Running Soot
+        // Running Soot        
         soot.Main.main(args);
+        } catch (Exception e) {
+            System.out.println("Aleluia");
+            System.exit(1);
+        } 
     }
 
 

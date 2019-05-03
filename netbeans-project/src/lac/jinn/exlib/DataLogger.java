@@ -14,6 +14,7 @@ public class DataLogger {
     static List<StringBuilder> logs = new ArrayList<StringBuilder>();
     
     public static void log (StringBuilder msg) {
+        System.out.println(msg + "]");
         logs.add(msg);
     }
     

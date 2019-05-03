@@ -25,6 +25,7 @@ import soot.LongType;
 import soot.PrimType;
 import soot.RefType;
 import soot.Scene;
+import soot.Type;
 import soot.Unit;
 import soot.Value;
 import soot.jimple.AssignStmt;
@@ -46,7 +47,7 @@ import soot.toolkits.graph.UnitGraph;
  * @author juniocezar
  */
 public class MethodProfiler extends BodyTransformer {
-    static Set<SootMethod> visited = new HashSet<SootMethod>();
+    static Set<Body> visited = new HashSet<Body>();
     Set<Value> globalsRead = new HashSet<Value>();
     
     @Override
@@ -54,19 +55,45 @@ public class MethodProfiler extends BodyTransformer {
         SootMethod method = body.getMethod();
         List<Local> parameters  = body.getParameterLocals();
         Set<AssignStmt> globalsRead = findGlobalsRead(body);
+        
+        if (globalsRead.size() == 0) {
+            if (parameters.size() == 0) return;
+            if (parameters.size() == 1 && parameters.get(0).getType().toString().equals("boolean")) {
+                return;
+            }
+        }
+        
                     
         // Logic: Build String: 'methodName, Pars: VAL1, VAL2, VAL3 - GLOBALS: VAL1, VAL2, VAL3'
         // #1 Read parameters and add to string, insert in the beggining
         // #2 Read Globals and add to string, insert after usage;
-       
-        instrumment(body, parameters, globalsRead);
+        if (! visited.contains(body) && !excludedMethod(method)) {
+            System.out.println("Analyzing: " + method);
+            visited.add(body);
+            instrumment(body, parameters, globalsRead);
+
+
+            boolean isMainMethod = body.getMethod().getSubSignature()
+                                                   .equals("void main(java.lang.String[])");
+            boolean isHarness = body.getMethod().getDeclaringClass().getName().
+                                                    contains("Harness");
+            if (isMainMethod && isHarness)
+                addDumper(body);
+        }
+            
+    }
+    
+    private boolean excludedMethod(SootMethod m) {
+        String pack = m.getDeclaringClass().getPackageName();
+        if (pack.startsWith("jdk") || pack.startsWith("java") || 
+                pack.contains("<init>") || pack.startsWith("avrora.arch")
+                || pack.startsWith("avrora.gui")) {
+            return true;
+        }
+        if (!m.hasActiveBody()) return true;
+        if (m.retrieveActiveBody().getUnits().size() < 80) return true;
         
-        boolean isMainMethod = body.getMethod().getSubSignature()
-                                               .equals("void main(java.lang.String[])");
-        boolean isHarness = body.getMethod().getDeclaringClass().getName().
-                                                contains("Harness");
-        if (isMainMethod && isHarness)
-            addDumper(body);
+        return false;
     }
     
     /**
@@ -94,7 +121,13 @@ public class MethodProfiler extends BodyTransformer {
         }
     }
     
-    private void instrumment (Body body, List<Local> pars, 
+    private String parsedType (String type) {
+        if (type.equals("short") || type.equals("byte"))
+            return "int";
+        return type;
+    }
+    
+    private synchronized void instrumment (Body body, List<Local> pars, 
                                                     Set<AssignStmt> globals) {
         // build stringBuilder, and add the values to construct the output        
         Chain<Unit> units = body.getUnits();
@@ -118,10 +151,15 @@ public class MethodProfiler extends BodyTransformer {
                 "<java.lang.StringBuilder: java.lang.StringBuilder append(java.lang.String)>").
                 makeRef(), StringConstant.v(body.getMethod().getSignature() +
                         " -- Pars: ["))));
+        
+        units.insertBefore(newUnits, inPoint);               
+        newUnits.clear();
+                
         //
         // === get parameters
         int getterId = 0;
         for (Local par : pars) {
+            if (! isCompatibleVar(par)) continue;
             // create a new String, get the String.valueOf(parameter) and pass it
             // to the new created string
             Local tmp = insertDeclaration("$r_str_" + par.getName(), 
@@ -161,7 +199,7 @@ public class MethodProfiler extends BodyTransformer {
                         "java.lang.Object" : ltype );
                 newUnits.add(Jimple.v().newAssignStmt(tmp, Jimple.v().newStaticInvokeExpr(
                 Scene.v().getMethod("<java.lang.String: java.lang.String valueOf("
-                        + t + ")>").makeRef(), par)));            
+                        + parsedType(t) + ")>").makeRef(), par)));            
             }
             
             newUnits.add(Jimple.v().newInvokeStmt(Jimple.v().newVirtualInvokeExpr(
@@ -180,10 +218,17 @@ public class MethodProfiler extends BodyTransformer {
                 makeRef(), StringConstant.v("] Globals: [ "))));
                
         
+        if (newUnits.size() > 0) {
+            units.insertBefore(newUnits, inPoint);               
+            newUnits.clear();            
+        }
+        
         //
         // === get globals
         for (AssignStmt globalAssign : globals) {
             Value lvalue = globalAssign.getLeftOp();
+            if (! isCompatibleVar((Local)lvalue)) continue;
+            
             List<Unit> localUnits = new ArrayList<Unit>();
             Local tmp = insertDeclaration("$r_str_" + globalAssign.hashCode(),
                                                "java.lang.String", body);
@@ -193,11 +238,11 @@ public class MethodProfiler extends BodyTransformer {
                 Local getter = insertDeclaration("$getter_" +
                                                    getterId++, "int", body);
                 LengthExpr lengthOf = Jimple.v().newLengthExpr(lvalue);
-                newUnits.add(Jimple.v().newAssignStmt(getter, lengthOf));
-                newUnits.add(Jimple.v().newAssignStmt(tmp, Jimple.v().newStaticInvokeExpr(
+                localUnits.add(Jimple.v().newAssignStmt(getter, lengthOf));
+                localUnits.add(Jimple.v().newAssignStmt(tmp, Jimple.v().newStaticInvokeExpr(
                 Scene.v().getMethod("<java.lang.String: java.lang.String valueOf(int)>"
                         ).makeRef(), getter)));  
-            } else if (!(lvalue.getType() instanceof PrimType)) {
+            } else if (!(lvalue.getType() instanceof PrimType) && ((RefType)lvalue.getType()).getSootClass().declaresMethod("int size()")) {
                 // Collections, get size
                 Local getter = insertDeclaration("$getter_" +
                                                    getterId++, "int", body);
@@ -212,8 +257,8 @@ public class MethodProfiler extends BodyTransformer {
                                 Scene.v().getMethod("<" + lvalue.getType().toString() + ": "
                                 + "int size()>").makeRef());
                 }
-                newUnits.add(Jimple.v().newAssignStmt(getter, invokeExpr));
-                newUnits.add(Jimple.v().newAssignStmt(tmp, Jimple.v().newStaticInvokeExpr(
+                localUnits.add(Jimple.v().newAssignStmt(getter, invokeExpr));
+                localUnits.add(Jimple.v().newAssignStmt(tmp, Jimple.v().newStaticInvokeExpr(
                 Scene.v().getMethod("<java.lang.String: java.lang.String valueOf(int)>"
                         ).makeRef(), getter)));   
             } else {
@@ -222,7 +267,7 @@ public class MethodProfiler extends BodyTransformer {
                         "java.lang.Object" : ltype );
                 localUnits.add(Jimple.v().newAssignStmt(tmp, Jimple.v().newStaticInvokeExpr(
                 Scene.v().getMethod("<java.lang.String: java.lang.String valueOf("
-                        + t + ")>").makeRef(), lvalue)));
+                        + parsedType(t) + ")>").makeRef(), lvalue)));
             }            
             
             
@@ -240,10 +285,7 @@ public class MethodProfiler extends BodyTransformer {
             // locals
             units.insertAfter(localUnits, globalAssign);
         }
-              
-        //
-        // we insert reads of all parameters in the begginig of method
-        units.insertBefore(newUnits, inPoint);       
+                
         //
         // we call the logger library with the constructed string
         SootClass loggerClass  = Scene.v().getSootClass("lac.jinn.exlib.DataLogger");
@@ -253,7 +295,14 @@ public class MethodProfiler extends BodyTransformer {
                         "void log(java.lang.StringBuilder)").makeRef(), 
                         var_builder));
             units.insertBefore(dump, exit);
-        }        
+        }
+        
+        try {
+            body.validate();
+        } catch (Exception e) {
+            System.err.println("Error while validatin body: " + e);
+            System.exit(1);
+        }
     }
     
     /**
@@ -328,6 +377,31 @@ public class MethodProfiler extends BodyTransformer {
                 globalsRead.add(((AssignStmt) u).getLeftOp());
                 return true;
             }            
+        }
+        return false;
+    }
+    
+    /**
+     * Checks if the input local variable is primitive/Collection or exports intValue.
+     * @param local Local parameter to be analyzed.
+     * @return True in case the input local is compatible with JINN-C.
+     */
+    private boolean isCompatibleVar (Local local) {
+        Type type = local.getType();
+        if (type instanceof PrimType) {
+            //if (type instanceof IntType)
+            return true;
+        } else if (type instanceof ArrayType)  {
+            return true;
+        } else {
+            RefType ref = (RefType) type;
+            SootClass sClass = ref.getSootClass();
+            if (sClass.declaresMethod("int size()")) {
+                return true;
+            } else if (sClass.declaresMethod("int intValue()")) {
+                // should gets Integer, Float, Double....
+                return true;
+            }
         }
         return false;
     }
